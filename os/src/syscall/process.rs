@@ -37,16 +37,13 @@ pub fn sys_get_time(ts: *mut TimeVal, _tz: usize) -> isize {
     }
     0
 }
-use crate::syscall::WRITE_COUNT;
-use crate::syscall::EXIT_COUNT;
-use crate::syscall::YIELD_COUNT;
-use crate::syscall::GET_TIME_COUNT;
-use crate::syscall::TRACE_COUNT;
 use crate::syscall::SYSCALL_WRITE;
 use crate::syscall::SYSCALL_EXIT;
 use crate::syscall::SYSCALL_YIELD;
 use crate::syscall::SYSCALL_GET_TIME;
 use crate::syscall::SYSCALL_TRACE;
+use crate::task::get_syscall_count;
+use crate::task::add_syscall_count;
 // TODO: implement the syscall
 pub fn sys_trace(_trace_request: usize, _id: usize, _data: usize) -> isize {
     match _trace_request {
@@ -62,11 +59,11 @@ pub fn sys_trace(_trace_request: usize, _id: usize, _data: usize) -> isize {
         }
         2 => {
             match _id {
-                SYSCALL_WRITE => unsafe { WRITE_COUNT as isize },
-                SYSCALL_EXIT => unsafe { EXIT_COUNT as isize },
-                SYSCALL_YIELD => unsafe { YIELD_COUNT as isize },
-                SYSCALL_GET_TIME => unsafe { GET_TIME_COUNT as isize },
-                SYSCALL_TRACE => unsafe { TRACE_COUNT as isize },
+                SYSCALL_WRITE =>  { get_syscall_count(SYSCALL_WRITE) as isize },
+                SYSCALL_EXIT =>  { get_syscall_count(SYSCALL_EXIT) as isize },
+                SYSCALL_YIELD =>  { get_syscall_count(SYSCALL_YIELD) as isize },
+                SYSCALL_GET_TIME =>  { get_syscall_count(SYSCALL_GET_TIME) as isize },
+                SYSCALL_TRACE =>  { add_syscall_count(SYSCALL_TRACE); get_syscall_count(SYSCALL_TRACE) as isize },
                 _ => panic!("Unsupported syscall_id: {}", _id),
             }
         }
