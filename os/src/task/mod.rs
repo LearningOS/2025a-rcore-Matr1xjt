@@ -199,6 +199,12 @@ pub fn current_trap_cx() -> &'static mut TrapContext {
     TASK_MANAGER.get_current_trap_cx()
 }
 
+pub fn current_page_table() -> usize {
+    let inner = TASK_MANAGER.inner.exclusive_access();
+    let current = inner.current_task;
+    inner.tasks[current].memory_set.page_table
+}
+
 /// Change the current 'Running' task's program break
 pub fn change_program_brk(size: i32) -> Option<usize> {
     TASK_MANAGER.change_current_program_brk(size)
@@ -215,4 +221,5 @@ pub fn get_syscall_count(syscall_id: usize) -> usize {
     let current = inner.current_task;
     inner.tasks[current].syscall_count[syscall_id]
 }
+
 

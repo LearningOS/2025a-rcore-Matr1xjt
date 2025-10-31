@@ -30,42 +30,38 @@ use crate::task::get_syscall_count;
 use crate::task::add_syscall_count;
 use crate::mm::VirtAddr;
 use crate::task::current_user_token;
+use crate::timer::get_time;
 use core::mem;
+use crate::mm::PageTable;
+use crate::mm::page_table::translated_refmut;
 /// YOUR JOB: get time with second and microsecond
 /// HINT: You might reimplement it with virtual memory management.
 /// HINT: What if [`TimeVal`] is splitted by two pages ?
 pub fn sys_get_time(_ts: *mut TimeVal, _tz: usize) -> isize {
-    let us = crate::timer::get_time_us();
     let token = current_user_token();
-    let pagetable = crate::mm::PageTable::from_token(token);
-    let sec_addr = _ts as usize;
-    let usec_addr = sec_addr + mem::size_of::<usize>();
-    let sec_page = VirtAddr::from(sec_addr).floor();
-    let usec_page = VirtAddr::from(usec_addr).floor();
-    if let Some(pte) = pagetable.find_pte(sec_page) {
-        if !pte.is_valid() || !pte.writable() {
-            return -1;
-        }
-    } else {
-        return -1;
-    }
+    let pagetable = PageTable::from_token(token);
 
-    if sec_page != usec_page {
-        if let Some(pte) = pagetable.find_pte(usec_page) {
-            if !pte.is_valid() || !pte.writable() {
-                return -1;
-            }
-        } else {
-            return -1;
-        }
-    }
+    // 检查 TimeVal 结构体可能跨的两页
+    let start_va = VirtAddr::from(_ts as usize).floor();
+    let end_va = VirtAddr::from(_ts as usize + mem::size_of::<TimeVal>() - 1).floor();
 
-    unsafe {
-        if !_ts.is_null() {
-            (*_ts).sec = us / 1_000_000;
-            (*_ts).usec = us % 1_000_000;
+    for va in [start_va, end_va] {
+        match pagetable.find_pte(va) {
+            Some(pte) if pte.is_valid() && pte.writable() => {},
+            _ => return -1, // 无效或不可写
         }
     }
+    let ts = translated_refmut::<TimeVal>(token, _ts);
+    // 获取当前时间（假设 get_time 返回毫秒）
+    let current_time = get_time();
+    // 写入用户空间
+    
+        *ts = TimeVal {
+            sec: current_time / 1000,
+            usec: (current_time % 1000) * 1000,
+        };
+    
+
     0
 }
 
@@ -78,20 +74,34 @@ pub fn sys_trace(_trace_request: usize, _id: usize, _data: usize) -> isize {
     let pagetable = crate::mm::PageTable::from_token(token);
     match _trace_request {
         0 => {
-            let pte = pagetable.find_pte(VirtAddr::from(_id as usize).floor()).unwrap();
-            if !pte.is_valid() || !pte.readable() {
+            if _id >= isize::MAX as usize
+            {
                 return -1;
             }
-            let res = unsafe{ *(_id as *const u8)};
+            match pagetable.find_pte(VirtAddr::from(_id as usize).floor()) {
+                None => return -1,
+                Some(pte) => {
+                    if !pte.is_valid() || !pte.readable() {
+                        return -1;
+                    }
+                }
+            }
+            let id = translated_refmut::<u8>(token, _id as *mut u8);
+            let res = unsafe{ *(id as *const u8)};
             res as isize
         }
         1 => {
             unsafe {
-                let pte = pagetable.find_pte(VirtAddr::from(_id as usize).floor()).unwrap();
-                if !pte.is_valid() || !pte.writable() {
-                    return -1;
+                match pagetable.find_pte(VirtAddr::from(_id as usize).floor()) {
+                    None => return -1,
+                    Some(pte) => {
+                        if !pte.is_valid() || !pte.writable() {
+                            return -1;
+                        }
+                    }
                 }
-                *(_id as *mut u8) = _data as u8;
+                let id = translated_refmut::<u8>(token, _id as *mut u8);
+                *(id as *mut u8) = _data as u8;
             }
             0
         }
@@ -102,6 +112,7 @@ pub fn sys_trace(_trace_request: usize, _id: usize, _data: usize) -> isize {
                 SYSCALL_YIELD =>  { get_syscall_count(SYSCALL_YIELD) as isize },
                 SYSCALL_GET_TIME =>  { get_syscall_count(SYSCALL_GET_TIME) as isize },
                 SYSCALL_TRACE =>  { add_syscall_count(SYSCALL_TRACE); get_syscall_count(SYSCALL_TRACE) as isize },
+                //SYSCALL_GET_TIME =>  { get_syscall_count(SYSCALL_GET_TIME) as isize },
                 _ => panic!("Unsupported syscall_id: {}", _id),
             }
         }
@@ -111,46 +122,77 @@ pub fn sys_trace(_trace_request: usize, _id: usize, _data: usize) -> isize {
     }   
 }
 
+
 // YOUR JOB: Implement mmap.
 pub fn sys_mmap(_start: usize, _len: usize, _port: usize) -> isize {
+    if _start % 4096 != 0 || _len == 0 {
+        return -1;
+    }
+    // 权限检查
+    if _port == 0 || (_port & !0x7) != 0 {
+        return -1;
+    }
+
     let token = current_user_token();
     let mut pagetable = crate::mm::PageTable::from_token(token);
-    for i in 0..(_len + 4095) / 4096 {
+    let page_count = (_len + 4095) / 4096;
+
+    match pagetable.find_pte(VirtAddr::from(_start+(_len-1)).floor()) {
+        Some(pte) if pte.is_valid() => return -1, // 已映射
+        _ => {}
+    }
+
+    for i in 0..page_count {
         let addr = _start + i * 4096;
-        match pagetable.find_pte_create(VirtAddr::from(addr).floor()){
+        match pagetable.find_pte_create(VirtAddr::from(addr).floor()) {
             None => return -1,
             Some(pte) => {
-                if !pte.is_valid() {
-                    *pte = crate::mm::PageTableEntry::new(
-            crate::mm::PhysPageNum(_port + i),
-            crate::mm::PTEFlags::R | crate::mm::PTEFlags::W | crate::mm::PTEFlags::X | crate::mm::PTEFlags::U | crate::mm::PTEFlags::V,
-        );
+                if pte.is_valid() {
+                    return -1; // 已映射
                 }
+
+                let frame = match crate::mm::frame_alloc() {
+                    Some(f) => f,
+                    None => return -1,
+                };
+
+                let mut flags = crate::mm::page_table::PTEFlags::U | crate::mm::page_table::PTEFlags::V;
+                if (_port & 1) != 0 { flags |= crate::mm::page_table::PTEFlags::R; }
+                if (_port & 2) != 0 { flags |= crate::mm::page_table::PTEFlags::W; }
+                if (_port & 4) != 0 { flags |= crate::mm::page_table::PTEFlags::X; }
+
+                pagetable.map(VirtAddr::from(addr).floor(), frame.ppn, flags);
             }
         }
-        
     }
     0
 }
 
-// YOUR JOB: Implement munmap.
 pub fn sys_munmap(_start: usize, _len: usize) -> isize {
-    let token = current_user_token();
-    let mut pagetable = crate::mm::PageTable::from_token(token);
-    for i in 0..(_len + 4095) / 4096 {
+    // if _start % 4096 != 0 || _len == 0 {
+    //     return -1;
+    // }
+
+    // let token = current_user_token();
+    // let pagetable = crate::mm::PageTable::from_token(token);
+    // let page_count = (_len + 4095) / 4096;
+    for i in 0..page_count {
         let addr = _start + i * 4096;
-        match pagetable.find_pte_create(VirtAddr::from(addr).floor()){
+        match pagetable.find_pte(VirtAddr::from(addr).floor()) {
             None => return -1,
             Some(pte) => {
                 if pte.is_valid() {
                     *pte = crate::mm::PageTableEntry::empty();
                 }
+                else {
+                    return -1; // 未映射
+                }
             }
         }
-        
     }
     0
 }
+
 /// change data segment size
 pub fn sys_sbrk(size: i32) -> isize {
     trace!("kernel: sys_sbrk");
