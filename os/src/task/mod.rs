@@ -45,6 +45,7 @@ pub fn suspend_current_and_run_next() {
     let task_cx_ptr = &mut task_inner.task_cx as *mut TaskContext;
     // Change status to Ready
     task_inner.task_status = TaskStatus::Ready;
+    // task_inner.stride += task_inner.pass;
     drop(task_inner);
     // ---- release current PCB
 
@@ -92,6 +93,7 @@ pub fn exit_current_and_run_next(exit_code: i32) {
     inner.children.clear();
     // deallocate user space
     inner.memory_set.recycle_data_pages();
+    // inner.stride += inner.pass;
     drop(inner);
     // **** release current PCB
     // drop task manually to maintain rc correctly
