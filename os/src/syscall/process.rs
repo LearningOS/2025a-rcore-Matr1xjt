@@ -1,7 +1,7 @@
 //! Process management syscalls
 //!
 use alloc::sync::Arc;
-
+const BIG_STRIDE: usize = 0x7fffffff;
 use crate::{
     fs::{open_file, OpenFlags},
     mm::{translated_refmut, translated_str},
@@ -101,34 +101,102 @@ pub fn sys_waitpid(pid: isize, exit_code_ptr: *mut i32) -> isize {
     }
     // ---- release current PCB automatically
 }
+use crate::mm::VirtAddr;
+// use crate::task::current_user_token;
+use crate::timer::get_time;
+use core::mem;
 
+// use crate::mm::page_table::translated_refmut;
 /// YOUR JOB: get time with second and microsecond
 /// HINT: You might reimplement it with virtual memory management.
 /// HINT: What if [`TimeVal`] is splitted by two pages ?
 pub fn sys_get_time(_ts: *mut TimeVal, _tz: usize) -> isize {
-    trace!(
-        "kernel:pid[{}] sys_get_time NOT IMPLEMENTED",
-        current_task().unwrap().pid.0
-    );
-    -1
+    let token = current_user_token();
+    let pagetable = crate::mm::page_table::PageTable::from_token(token);
+    // 检查 TimeVal 结构体可能跨的两页
+    let start_va = VirtAddr::from(_ts as usize).floor();
+    let end_va = VirtAddr::from(_ts as usize + mem::size_of::<TimeVal>() - 1).floor();
+    for va in [start_va, end_va] {
+        match pagetable.find_pte(va) {
+            Some(pte) if pte.is_valid() && pte.writable() => {},
+            _ => return -1, // 无效或不可写
+        }
+    }
+    let ts = translated_refmut::<TimeVal>(token, _ts);
+    // 获取当前时间（假设 get_time 返回毫秒）
+    let current_time = get_time();
+    // 写入用户空间
+        *ts = TimeVal {
+            sec: current_time / 1000,
+            usec: (current_time % 1000) * 1000,
+        };
+    0
 }
 
 /// YOUR JOB: Implement mmap.
 pub fn sys_mmap(_start: usize, _len: usize, _port: usize) -> isize {
-    trace!(
-        "kernel:pid[{}] sys_mmap NOT IMPLEMENTED",
-        current_task().unwrap().pid.0
-    );
-    -1
+    if _start % 4096 != 0 || _len == 0 {
+        return -1;
+    }
+    // 权限检查
+    if _port == 0 || (_port & !0x7) != 0 {
+        return -1;
+    }
+
+    let token = current_user_token();
+
+    let mut pagetable = crate::mm::page_table::PageTable::from_token(token);
+
+    let page_count = (_len + 4095) / 4096;
+    match pagetable.find_pte(VirtAddr::from(_start+(_len-1)).floor()) {
+        Some(pte) if pte.is_valid() => return -1, // 已映射
+        _ => {}
+    }
+    for i in 0..page_count {
+        let addr = _start + i * 4096;
+        match pagetable.find_pte_create(VirtAddr::from(addr).floor()) {
+            None => return -1,
+            Some(pte) => {
+                if pte.is_valid() {
+                    return -1; // 已映射
+                }
+
+                let frame = match crate::mm::frame_alloc() {
+                    Some(f) => f,
+                    None => return -1,
+                };
+                let mut flags = crate::mm::page_table::PTEFlags::U | crate::mm::page_table::PTEFlags::V;
+                if (_port & 1) != 0 { flags |= crate::mm::page_table::PTEFlags::R; }
+                if (_port & 2) != 0 { flags |= crate::mm::page_table::PTEFlags::W; }
+                if (_port & 4) != 0 { flags |= crate::mm::page_table::PTEFlags::X; }
+                pagetable.map(VirtAddr::from(addr).floor(), frame.ppn, flags);
+            }
+        }
+    }
+    0
 }
 
 /// YOUR JOB: Implement munmap.
 pub fn sys_munmap(_start: usize, _len: usize) -> isize {
-    trace!(
-        "kernel:pid[{}] sys_munmap NOT IMPLEMENTED",
-        current_task().unwrap().pid.0
-    );
-    -1
+    let token = current_user_token();
+    let pagetable = crate::mm::page_table::PageTable::from_token(token);
+
+    let page_count = (_len + 4095) / 4096;
+    for i in 0..page_count {
+        let addr = _start + i * 4096;
+        match pagetable.find_pte(VirtAddr::from(addr).floor()) {
+            None => return -1,
+            Some(pte) => {
+                if pte.is_valid() {
+                    *pte = crate::mm::PageTableEntry::empty();
+                }
+                else {
+                    return -1; // 未映射
+                }
+            }
+        }
+    }
+    0
 }
 
 /// change data segment size
@@ -140,22 +208,38 @@ pub fn sys_sbrk(size: i32) -> isize {
         -1
     }
 }
-
+use crate::task::TaskControlBlock;
+// use crate::loader::get_app_data_by_name;
 /// YOUR JOB: Implement spawn.
 /// HINT: fork + exec =/= spawn
 pub fn sys_spawn(_path: *const u8) -> isize {
-    trace!(
-        "kernel:pid[{}] sys_spawn NOT IMPLEMENTED",
-        current_task().unwrap().pid.0
-    );
-    -1
+    let token = current_user_token();
+    let path = translated_str(token, _path);
+    if let Some(app_inode) = open_file(path.as_str(), OpenFlags::RDONLY) {
+        let all_data = app_inode.read_all();
+        let new_task = Arc::new(TaskControlBlock::new(all_data.as_slice()));
+        let new_pid = new_task.pid.0;
+        let current_task = current_task().unwrap();
+        new_task.inner_exclusive_access().parent = Some(Arc::downgrade(&current_task));
+        current_task
+            .inner_exclusive_access()
+            .children
+            .push(Arc::clone(&new_task));
+        add_task(new_task.into());
+        // new_task.exec(data);
+        return new_pid as isize;
+    } else {
+        return -1;
+    }
 }
 
 // YOUR JOB: Set task priority.
 pub fn sys_set_priority(_prio: isize) -> isize {
-    trace!(
-        "kernel:pid[{}] sys_set_priority NOT IMPLEMENTED",
-        current_task().unwrap().pid.0
-    );
-    -1
+    let current_task = current_task().unwrap();
+    if _prio < 2 {
+        return -1;
+    } else {
+        current_task.inner_exclusive_access().pass = BIG_STRIDE / (_prio as usize);
+        return _prio;
+    }
 }

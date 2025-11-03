@@ -74,30 +74,64 @@ pub fn sys_close(fd: usize) -> isize {
     inner.fd_table[fd].take();
     0
 }
-
+use crate::mm::translated_refmut;
 /// YOUR JOB: Implement fstat.
 pub fn sys_fstat(_fd: usize, _st: *mut Stat) -> isize {
-    trace!(
-        "kernel:pid[{}] sys_fstat NOT IMPLEMENTED",
-        current_task().unwrap().pid.0
-    );
-    -1
+    let task = current_task().unwrap();
+    let inner = task.inner_exclusive_access();
+    if _fd >= inner.fd_table.len() {
+        return -1;
+    }
+    if let Some(file) = &inner.fd_table[_fd] {
+        let file = file.clone();
+        // release current task TCB manually to avoid multi-borrow
+        drop(inner);
+        let stat = file.stat();
+        let token = current_user_token();
+        *translated_refmut(token, _st) = stat;
+    }
+    0
 }
 
 /// YOUR JOB: Implement linkat.
 pub fn sys_linkat(_old_name: *const u8, _new_name: *const u8) -> isize {
-    trace!(
-        "kernel:pid[{}] sys_linkat NOT IMPLEMENTED",
-        current_task().unwrap().pid.0
-    );
-    -1
+    //let task = current_task().unwrap();
+    let token = current_user_token();
+    let _old_path = translated_str(token, _old_name);
+    let _new_path = translated_str(token, _new_name);
+    if (_old_path.as_str().is_empty()) || (_new_path.as_str().is_empty() || _old_path.as_str() == _new_path.as_str()) {
+        return -1;
+    }
+    let root_inode = crate::fs::inode::ROOT_INODE.clone();
+    let old_inode_option = root_inode.find(_old_path.as_str());
+    if old_inode_option.is_none() {
+        return -1;
+    }
+    let old_inode = old_inode_option.unwrap();
+    if root_inode.find(_new_path.as_str()).is_some() {
+        return -1;
+    }
+    root_inode.link(_new_path.as_str(), &old_inode);
+    old_inode.inc_link_count();
+    0
 }
-
 /// YOUR JOB: Implement unlinkat.
 pub fn sys_unlinkat(_name: *const u8) -> isize {
-    trace!(
-        "kernel:pid[{}] sys_unlinkat NOT IMPLEMENTED",
-        current_task().unwrap().pid.0
-    );
-    -1
+    let token = current_user_token();
+    let path = translated_str(token, _name);
+    if path.as_str().is_empty() {
+        return -1;
+    }
+    let root_inode = crate::fs::inode::ROOT_INODE.clone();
+    let inode_option = root_inode.find(path.as_str());
+    if inode_option.is_none() {
+        return -1;
+    }
+    let inode = inode_option.unwrap();
+    if inode.link_count() <= 1 {
+        inode.clear();
+    }
+    root_inode.unlink(path.as_str());
+    inode.dec_link_count();
+    0
 }
