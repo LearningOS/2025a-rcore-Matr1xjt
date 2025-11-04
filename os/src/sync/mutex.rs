@@ -103,3 +103,41 @@ impl Mutex for MutexBlocking {
         }
     }
 }
+
+use alloc::vec;
+/// Deadlock detection struct
+pub struct DeadlockDetect {
+    available: vec[0; 32],
+    allocated: vec![vec![0; 32]; 1024],
+    need : vec![vec![0; 32]; 1024],
+}
+use alloc::vec::Vec;
+impl DeadlockDetect {
+    /// Create a new deadlock detection struct
+    pub fn new() -> Self {
+        Self {
+            available: Vec::<int>,
+            allocated: vec![vec![0; 32]; 1024],
+            need: vec![vec![0; 32]; 1024],
+        }
+    }
+    
+    pub fn detect_deadlock(&self) -> bool {
+        let work = self.available.clone();
+        let finish = vec![false; self.allocated.len()];
+        let mut changed = true;
+        while changed {
+            changed = false;
+            for i in 0..self.allocated.len() {
+                if !finish[i] && self.need[i].iter().zip(work.iter()).all(|(n, w)| n <= w) {
+                    for j in 0..work.len() {
+                        work[j] += self.allocated[i][j];
+                    }
+                    finish[i] = true;
+                    changed = true;
+                }
+            }
+        }
+        !finish.iter().all(|&f| f)
+    }
+}

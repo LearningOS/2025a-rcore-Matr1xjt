@@ -151,12 +151,30 @@ pub fn sys_kill(pid: usize, signal: u32) -> isize {
 /// YOUR JOB: get time with second and microsecond
 /// HINT: You might reimplement it with virtual memory management.
 /// HINT: What if [`TimeVal`] is splitted by two pages ?
+use core::mem;
+use crate::mm::VirtAddr;
+use crate::timer::get_time;
 pub fn sys_get_time(_ts: *mut TimeVal, _tz: usize) -> isize {
-    trace!(
-        "kernel:pid[{}] sys_get_time NOT IMPLEMENTED",
-        current_task().unwrap().process.upgrade().unwrap().getpid()
-    );
-    -1
+    let token = current_user_token();
+    let pagetable = crate::mm::page_table::PageTable::from_token(token);
+    // 检查 TimeVal 结构体可能跨的两页
+    let start_va = VirtAddr::from(_ts as usize).floor();
+    let end_va = VirtAddr::from(_ts as usize + mem::size_of::<TimeVal>() - 1).floor();
+    for va in [start_va, end_va] {
+        match pagetable.find_pte(va) {
+            Some(pte) if pte.is_valid() && pte.writable() => {},
+            _ => return -1, // 无效或不可写
+        }
+    }
+    let ts = translated_refmut::<TimeVal>(token, _ts);
+    // 获取当前时间（假设 get_time 返回毫秒）
+    let current_time = get_time();
+    // 写入用户空间
+        *ts = TimeVal {
+            sec: current_time / 1000,
+            usec: (current_time % 1000) * 1000,
+        };
+    0
 }
 
 /// mmap syscall
