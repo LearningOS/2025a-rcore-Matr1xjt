@@ -107,28 +107,64 @@ impl Mutex for MutexBlocking {
 use alloc::vec;
 /// Deadlock detection struct
 pub struct DeadlockDetect {
-    available: vec[0; 32],
-    allocated: vec![vec![0; 32]; 1024],
-    need : vec![vec![0; 32]; 1024],
+    available: Vec<usize>,
+    allocated: Vec<Vec<usize>>,
+    need : Vec<Vec<usize>>,
 }
 use alloc::vec::Vec;
+use lazy_static::lazy_static;    
+
 impl DeadlockDetect {
-    /// Create a new deadlock detection struct
-    pub fn new() -> Self {
-        Self {
-            available: Vec::<int>,
-            allocated: vec![vec![0; 32]; 1024],
-            need: vec![vec![0; 32]; 1024],
-        }
+    pub fn available_init(&mut self, resource_num: usize, total: usize) {
+        self.available[resource_num] = total;
     }
     
+    pub fn mutex_request(&mut self, thread_id: usize, request_id: usize, request: usize) -> bool {
+        if request > self.available[request_id] {
+            self.need[thread_id][request_id] += request;
+            if self.detect_deadlock() {
+                //println!("DeadlockDetect: thread {} request {} denied (deadlock)", thread_id, request);
+                return false;
+            }
+            //println!("DeadlockDetect: thread {} request {} blocked ,request_id {}, resource {}", thread_id, request,request_id, self.available[request_id]);
+            return true;
+        }
+
+        self.need[thread_id][request_id] += request;
+        if !self.detect_deadlock() {
+            self.available[request_id] -= request;
+            self.allocated[thread_id][request_id] += request;
+            self.need[thread_id][request_id] -= request;
+            //println!("DeadlockDetect: thread {} request {} granted ,request_id {}, resource {}", thread_id, request,request_id, self.available[request_id]);
+            true
+        } else {
+            self.need[thread_id][request_id] -= request;
+            //println!("DeadlockDetect: thread {} request {} request_id {} resource {} denied (deadlock)", thread_id, request,request_id, self.available[request_id]);
+            false
+        }
+    }
+
+    pub fn mutex_release(&mut self, thread_id: usize, release_id: usize, release: usize) {
+        if release > self.allocated[thread_id][release_id] {
+            return;
+        }
+        // if self.detect_deadlock() {
+        //     println!("DeadlockDetect: thread {} release {} denied (deadlock)", thread_id, release);
+        //     return;
+        // }
+        self.allocated[thread_id][release_id] -= release;
+        self.available[release_id] += release;
+        //println!("DeadlockDetect: thread {} release {} released", thread_id, release);
+    }
     pub fn detect_deadlock(&self) -> bool {
-        let work = self.available.clone();
-        let finish = vec![false; self.allocated.len()];
+        let mut work = self.available.clone();
+        //println!("available: {:?}", work);
+        let mut finish = vec![false; self.allocated.len()];
         let mut changed = true;
         while changed {
             changed = false;
             for i in 0..self.allocated.len() {
+                //println!("need[i][j] <= work[j] ? {:?} <= {:?}", self.need[i][0], work);
                 if !finish[i] && self.need[i].iter().zip(work.iter()).all(|(n, w)| n <= w) {
                     for j in 0..work.len() {
                         work[j] += self.allocated[i][j];
@@ -138,6 +174,17 @@ impl DeadlockDetect {
                 }
             }
         }
-        !finish.iter().all(|&f| f)
+        !finish.iter().all(|&f| f) // 返回true表示存在死锁
     }
 }
+
+lazy_static! {
+    /// Deadlock detection instance
+    pub static ref DEADLOCK_DETECT: UPSafeCell<DeadlockDetect> = unsafe {
+            UPSafeCell::new(DeadlockDetect {
+                available: vec![0; 256],
+                allocated: vec![vec![0;256];256],
+                need: vec![vec![0;256];256],
+            })
+        };
+    }
